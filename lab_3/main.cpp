@@ -1,116 +1,164 @@
 #include <iostream>
 #include <mpi.h>
 
-#define MATRIX_MIN 0
-#define MATRIX_MAX 1
-#define N1 8
-#define N2 4
-#define N3 4
+#define DIMENSION 2
+#define MAIN_PROC 0
+#define ZERO_BRANCH 0
 
-double* init_matrix(int column_len, int str_len){
-    auto *matrix = new double[str_len * column_len];
-    for (int i = 0; i < column_len; ++i) {
-        for (int j = 0; j < str_len; ++j) {
-            matrix[i * str_len + j] = (double) rand() / (double)RAND_MAX;
-            if (i == j) matrix[i * str_len + j] = 1;
+#define N1 8
+#define N2 8
+#define N3 8
+
+#define P1 2
+#define P2 2
+
+#define MIN 0
+#define MAX 1
+
+double* initMatrix(int column, int row) {
+    auto *matrix = new double[row * column];
+    for (size_t i = 0; i < column; ++i) {
+        for (size_t j = 0; j < row; ++j) {
+            matrix[i * row + j] = 1.0f;
+            if (i == j) matrix[i * row + j] = 2.0f;
+            //matrix[i * secondBoard + j] = (MAX - MIN) * ((double) rand() / (double)RAND_MAX) + MIN;
         }
     }
     return matrix;
 }
 
-void print_matrix(const double * matrix, int column_len, int str_len){
-    for (size_t i = 0; i < column_len; ++i) {
-        for (size_t j = 0; j < str_len; ++j) {
-            printf("%f ", matrix[i * str_len + j]);
+void printMatrix(const double *matrix, int column, int row) {
+    for (size_t i = 0; i < column; ++i) {
+        for (size_t j = 0; j < row; ++j) {
+            std::cout << matrix[i * row + j] << ' ';
         }
-        printf("\n");
+        std::cout << std::endl;
     }
-    printf("\n");
+    std::cout << std::endl;
 }
+/* return 2D grid communicator for matrix multiplication
+ * dims - array number of processes in each block*/
+MPI_Comm initGrid2D(const int *dims) {
+    int periods[DIMENSION] = {0, 0};
+    int reorder = false;
+    MPI_Comm result;
+    MPI_Cart_create(MPI_COMM_WORLD, DIMENSION, dims, periods, reorder, &result);
 
-void scatter(double *A, double *segmentA, double *B, double *segmentB, int *coords, int segmentRows, int segmentCols, MPI_Comm rowComm, MPI_Comm colComm){
-    if (coords[0] == 0) {
-        MPI_Scatter(A, segmentRows * N2, MPI_DOUBLE, segmentA, segmentRows * N2, MPI_DOUBLE, 0, colComm);
-    }
-    if (coords[1] == 0) {
-        MPI_Datatype sendSegment;
-        MPI_Datatype sendSegmentDouble;
-
-        MPI_Type_vector(N2, segmentCols, N3, MPI_DOUBLE, &sendSegment);
-        MPI_Type_commit(&sendSegment);
-
-        MPI_Type_create_resized(sendSegment, 0, segmentCols * sizeof(double), &sendSegmentDouble);
-        MPI_Type_commit(&sendSegmentDouble);
-
-        MPI_Scatter(B, 1, sendSegmentDouble, segmentB, N2 * segmentCols, MPI_DOUBLE, 0, rowComm);
-
-        MPI_Type_free(&sendSegment);
-        MPI_Type_free(&sendSegmentDouble);
-    }
-
-    MPI_Bcast(segmentA, segmentRows * N2, MPI_DOUBLE, 0, rowComm);
-    MPI_Bcast(segmentB, N2 * segmentCols, MPI_DOUBLE, 0, colComm);
+    return result;
 }
+/* return communicator for columns or rows
+ * varying_coords - array of dimension belonging to communicator
+ * grid - communicator 2D grid*/
+MPI_Comm initSplitGrid(int color, int key, MPI_Comm grid) {
+    MPI_Comm result;
+    //MPI_Cart_sub(grid, varyingCoords, &result);
+    MPI_Comm_split(grid, color, key, &result);
 
-void gather(double * C, double * segmentC, const int * dims, int * coords, int segmentRows, int segmentCols, int ProcNum, MPI_Comm gridComm, MPI_Comm rowComm, MPI_Comm colComm){
-    MPI_Datatype recvSegment;
-    MPI_Datatype recvSegmentDouble;
-    MPI_Type_vector(segmentRows, segmentCols, N3, MPI_DOUBLE, &recvSegment);
-    MPI_Type_commit(&recvSegment);
-    MPI_Type_create_resized(recvSegment, 0, segmentCols * sizeof(double), &recvSegmentDouble);
-    MPI_Type_commit(&recvSegmentDouble);
-
-    int recvCounts[ProcNum];
-    std::fill(recvCounts, recvCounts + ProcNum, 1);
-    int displs[ProcNum];
-    for (int procRank = 0; procRank < ProcNum; ++procRank) {
-        MPI_Cart_coords(gridComm, procRank, 2, coords);
-        displs[procRank] = dims[0] * segmentRows * coords[1] + coords[0];
-    }
-
-    MPI_Gatherv(segmentC, segmentRows * segmentCols, MPI_DOUBLE, C, recvCounts, displs, recvSegmentDouble, 0, gridComm);
-
-    MPI_Type_free(&recvSegment);
-    MPI_Type_free(&recvSegmentDouble);
-    MPI_Comm_free(&gridComm);
-    MPI_Comm_free(&colComm);
-    MPI_Comm_free(&rowComm);
+    return result;
 }
-
-void mainWork(double * A, double  * B, double * C, int ProcNum, int ProcRank){
-    MPI_Comm gridComm, rowComm, colComm;
-
-    int dims[2] = {0, 0};
-    int periods[2] = {0, 0};
-    int coords[2];
-    MPI_Dims_create(ProcNum, 2, dims);
-    MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 0, &gridComm);
-    MPI_Cart_coords(gridComm, ProcRank, 2, coords);
-    MPI_Comm_split(gridComm, coords[1], coords[0], &rowComm);
-    MPI_Comm_split(gridComm, coords[0], coords[1], &colComm);
-    int segmentRows = N1 / dims[1];
-    int segmentCols = N3 / dims[0];
-    auto *segmentA = new double[segmentRows * N2];
-    auto *segmentB = new double[N2 * segmentCols];
-    auto *segmentC = new double[segmentRows * segmentCols];
-
-    std::fill(segmentC, segmentC + segmentRows * segmentCols, 0);
-
-    scatter(A, segmentA, B, segmentB, coords, segmentRows, segmentCols, rowComm, colComm);
-
-    for (int i = 0; i < segmentRows; ++i) {
-        for (int k = 0; k < N2; ++k) {
-            for (int j = 0; j < segmentCols; ++j) {
-                segmentC[i * segmentCols + j] += segmentA[i * N2 + k] * segmentB[k * segmentCols + j];
+/* return segment matrix of segments matrices multiplication
+ * A, B - multiply segments matrices
+ * row, column - number of rows and columns result segment
+ * shift - number of columns in A and rows in B*/
+double* mulSegments(const double *A, const double *B, int row, int column, int shift) {
+    auto *result = new double[row * column];
+    for (int i = 0; i < row; ++i) {
+        for (int j = 0; j < column; ++j) {
+            result[i * column + j] = 0.0f;
+            for (int k = 0; k < shift; ++k) {
+                result[i * column + j] += A[i * shift + k] * B[k * column + j];
             }
         }
     }
+    return result;
+}
+/* return assembled matrix form segments on main processes, other processes return nullptr
+ * segment - segment of result matrix
+ * dims - array number of processes in each block
+ * rank - process rank
+ * grid - communicator 2D grid*/
+double* gatherMatrix(double *segment, const int *dims, int rank, MPI_Comm grid) {
+    double *result = nullptr;
+    int count[dims[0] * dims[1]], shift[dims[0] * dims[1]];
+    int row = N1 / dims[1];
+    int column = N3 / dims[0];
+    if (rank == MAIN_PROC) {
+        result = new double[N1 * N3];
+        for (int i = 0; i < dims[0]; ++i) {
+            for (int j = 0; j < dims[1]; ++j) {
+                count[i * dims[1] + j] = 1;
+                shift[i * dims[1] + j] = i * dims[1] * row + j;
+            }
+        }
+    }
+    MPI_Datatype segmentType;
+    MPI_Type_vector(row, column, N3, MPI_DOUBLE, &segmentType);
+    MPI_Type_create_resized(segmentType, 0, column * sizeof(double), &segmentType);
+    MPI_Type_commit(&segmentType);
 
-    gather(C, segmentC, dims, coords, segmentRows, segmentCols, ProcNum, gridComm, rowComm, colComm);
+    MPI_Gatherv(segment, row * column, MPI_DOUBLE, result, count, shift, segmentType, MAIN_PROC, grid);
+
+    MPI_Type_free(&segmentType);
+
+    return result;
+}
+/* return segment of matrix to current process
+ * matrix - original matrix
+ * pos - coordinate number
+ * coord - process coordinates
+ * block_size - number of base type elements in each block
+ * comm1, comm2 - segment recipient group communicators*/
+double* initSegment(double *matrix, int pos, const int *coords, int blockSize, MPI_Comm comm1, MPI_Comm comm2){
+    auto *segmentA = new double[blockSize * N2];
+    if (pos == 0 && coords[pos] == ZERO_BRANCH) {
+        MPI_Scatter(matrix, blockSize * N2, MPI_DOUBLE, segmentA, blockSize * N2, MPI_DOUBLE, MAIN_PROC, comm2);
+    }
+    if (pos == 1 && coords[pos] == ZERO_BRANCH) {
+        MPI_Datatype segmentType;
+        MPI_Type_vector(N2, blockSize, N3, MPI_DOUBLE, &segmentType);
+        MPI_Type_create_resized(segmentType, 0, blockSize * sizeof(double), &segmentType);
+        MPI_Type_commit(&segmentType);
+
+        MPI_Scatter(matrix, 1, segmentType, segmentA, N2 * blockSize, MPI_DOUBLE, MAIN_PROC, comm2);
+
+        MPI_Type_free(&segmentType);
+    }
+    MPI_Bcast(segmentA, blockSize * N2, MPI_DOUBLE, MAIN_PROC, comm1);
+    return segmentA;
+}
+/* realizable algorithm, return desired matrix main process, other processes return nullptr
+ * A, B - multiply matrices
+ * size - number of processes
+ * rank - current process number
+ * dims - array number of processes in each block*/
+double* matricesMulGrid2D(double *A, double *B, int size, int rank, const int *dims){
+    if (dims[0] * dims[1] != size) {
+        std::cout << "Bad dims" << std::endl;
+        return nullptr;
+    }
+    MPI_Comm gridComm = initGrid2D(dims);
+    int coords[DIMENSION];
+    MPI_Cart_coords(gridComm, rank, DIMENSION, coords);
+    MPI_Comm rowComm = initSplitGrid(coords[1], coords[0], gridComm);
+    MPI_Comm colComm = initSplitGrid(coords[0], coords[1], gridComm);
+    if (N1 % dims[1] != 0 || N3 % dims[0] != 0) {
+        std::cout << "Bad data" << std::endl;
+        return nullptr;
+    }
+    int segmentRows = N1 / dims[1];
+    int segmentCols = N3 / dims[0];
+
+    auto *segmentA = initSegment(A, 0, coords, segmentRows, rowComm, colComm);
+    auto *segmentB = initSegment(B, 1, coords, segmentCols, colComm, rowComm);
+    auto *segmentC = mulSegments(segmentA, segmentB, segmentRows, segmentCols, N2);
+
+    double *result = gatherMatrix(segmentC, dims, rank, gridComm);
 
     delete[] segmentA;
     delete[] segmentB;
     delete[] segmentC;
+
+    return result;
 }
 
 int main(int argc, char *argv[]) {
@@ -119,19 +167,23 @@ int main(int argc, char *argv[]) {
     MPI_Comm_size (MPI_COMM_WORLD, &ProcNum);
     MPI_Comm_rank (MPI_COMM_WORLD, &ProcRank);
 
-    double *A, *B, *C;
+    int dims[2] = {P1, P2};
+    //MPI_Dims_create(ProcNum, DIMENSION, dims);
+    double *A = nullptr;
+    double *B = nullptr;
     if (ProcRank == 0) {
-        A = init_matrix(N1, N2);
-        B = init_matrix(N2, N3);
-        C = init_matrix(N1, N3);
+        A = initMatrix(N1, N2);
+        B = initMatrix(N2, N3);
     }
-
-    mainWork(A, B, C, ProcNum, ProcRank);
+    double time = -MPI_Wtime();
+    double *C = matricesMulGrid2D(A, B, ProcNum, ProcRank, dims);
+    time += MPI_Wtime();
 
     if (ProcRank == 0) {
-        print_matrix(A, N1, N2);
-        print_matrix(B, N2, N3);
-        print_matrix(C, N1, N3);
+        printMatrix(A, N1, N2);
+        printMatrix(B, N2, N3);
+        printMatrix(C, N1, N3);
+        std::cout << "Time: " << time << "sec" << std::endl;
     }
 
     delete[] A;
